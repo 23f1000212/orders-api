@@ -1,6 +1,6 @@
 import base64
 import time
-from collections import defaultdict
+from collections import defaultdict, deque
 from typing import Optional
 
 from fastapi import FastAPI, Header, HTTPException, Response
@@ -49,39 +49,31 @@ def check_rate_limit(client_id: str):
 
     now = time.time()
 
-    hits = client_hits[client_id]
+    bucket = client_hits[client_id]
 
-    hits = [
-        t
-        for t in hits
-        if now - t < WINDOW
-    ]
+    while bucket and now - bucket[0] >= WINDOW:
+        bucket.popleft()
 
-    client_hits[client_id] = hits
-
-    if len(hits) >= RATE_LIMIT:
+    if len(bucket) >= RATE_LIMIT:
 
         retry_after = max(
             1,
-            int(WINDOW - (now - hits[0])) + 1
+            int(bucket[0] + WINDOW - now)
         )
 
         response = Response(
-            content='{"detail":"Rate limit exceeded"}',
+            status_code=429,
             media_type="application/json",
-            status_code=429
+            content='{"detail":"Rate limit exceeded"}'
         )
 
         response.headers["Retry-After"] = str(retry_after)
 
         return response
 
-    hits.append(now)
-
-    client_hits[client_id] = hits
+    bucket.append(now)
 
     return None
-
 
 # -------------------------------------------------------
 # Home
