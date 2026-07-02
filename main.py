@@ -3,10 +3,9 @@ import uuid
 from collections import defaultdict, deque
 from typing import Optional
 
-from fastapi import FastAPI, Header, Query, Response
+from fastapi import FastAPI, Header, Query, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel
 
 TOTAL_ORDERS = 59
 RATE_LIMIT = 17
@@ -14,9 +13,9 @@ WINDOW = 10  # seconds
 
 app = FastAPI(title="Orders API")
 
-# -----------------------------
+# -----------------------------------
 # CORS
-# -----------------------------
+# -----------------------------------
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -24,10 +23,11 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# -----------------------------
+# -----------------------------------
 # In-memory storage
-# -----------------------------
+# -----------------------------------
 idempotency_store = {}
+
 client_requests = defaultdict(deque)
 
 catalog = [
@@ -39,27 +39,20 @@ catalog = [
 ]
 
 
-# -----------------------------
-# Models
-# -----------------------------
-class OrderRequest(BaseModel):
-    item: str
-
-
-# -----------------------------
+# -----------------------------------
 # Rate Limiter
-# -----------------------------
+# -----------------------------------
 def check_rate_limit(client_id: str):
+
     now = time.time()
 
     bucket = client_requests[client_id]
 
-    # Remove expired timestamps
     while bucket and now - bucket[0] >= WINDOW:
         bucket.popleft()
 
-    # Limit exceeded
     if len(bucket) >= RATE_LIMIT:
+
         retry_after = max(
             1,
             int(WINDOW - (now - bucket[0])) + 1
@@ -80,9 +73,9 @@ def check_rate_limit(client_id: str):
     return None
 
 
-# -----------------------------
+# -----------------------------------
 # Home
-# -----------------------------
+# -----------------------------------
 @app.get("/")
 def home():
     return {
@@ -90,19 +83,19 @@ def home():
     }
 
 
-# -----------------------------
-# Create Order
-# -----------------------------
+# -----------------------------------
+# POST /orders
+# -----------------------------------
 @app.post("/orders", status_code=201)
-def create_order(
-    order: OrderRequest,
+async def create_order(
+    request: Request,
     response: Response,
     idempotency_key: Optional[str] = Header(
         default=None,
         alias="Idempotency-Key"
     ),
-    x_client_id: str = Header(
-        ...,
+    x_client_id: Optional[str] = Header(
+        default="default",
         alias="X-Client-Id"
     ),
 ):
@@ -111,7 +104,7 @@ def create_order(
     if rate:
         return rate
 
-    if idempotency_key is None:
+    if not idempotency_key:
         return JSONResponse(
             status_code=400,
             content={
@@ -123,28 +116,34 @@ def create_order(
         response.status_code = 200
         return idempotency_store[idempotency_key]
 
-    new_order = {
-        "id": str(uuid.uuid4()),
-        "item": order.item
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+
+    if not isinstance(body, dict):
+        body = {}
+
+    order = {
+        "id": str(uuid.uuid4())
     }
 
-    idempotency_store[idempotency_key] = new_order
+    order.update(body)
 
-    return new_order
+    idempotency_store[idempotency_key] = order
+
+    return order
 
 
-# -----------------------------
-# List Orders
-# -----------------------------
+# -----------------------------------
+# GET /orders
+# -----------------------------------
 @app.get("/orders")
 def list_orders(
-    limit: int = Query(
-        default=10,
-        gt=0
-    ),
+    limit: int = Query(10, gt=0),
     cursor: Optional[str] = None,
-    x_client_id: str = Header(
-        ...,
+    x_client_id: Optional[str] = Header(
+        default="default",
         alias="X-Client-Id"
     ),
 ):
