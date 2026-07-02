@@ -5,13 +5,12 @@ from typing import Optional
 
 from fastapi import FastAPI, Header, HTTPException, Response
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
 
-app = FastAPI()
+app = FastAPI(title="Orders API")
 
-# -----------------------------
+# -------------------------------------------------------
 # CORS
-# -----------------------------
+# -------------------------------------------------------
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -20,17 +19,17 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# -----------------------------
+# -------------------------------------------------------
 # Constants
-# -----------------------------
+# -------------------------------------------------------
 TOTAL_ORDERS = 59
 RATE_LIMIT = 17
 WINDOW = 10
 
-# -----------------------------
-# Data
-# -----------------------------
-orders_catalog = [
+# -------------------------------------------------------
+# In-memory storage
+# -------------------------------------------------------
+orders = [
     {
         "id": i,
         "description": f"Order {i}"
@@ -38,97 +37,98 @@ orders_catalog = [
     for i in range(1, TOTAL_ORDERS + 1)
 ]
 
-idempotency_cache = {}
+idempotency = {}
 
-client_requests = defaultdict(list)
+client_hits = defaultdict(list)
 
 
-# -----------------------------
+# -------------------------------------------------------
 # Rate Limiter
-# -----------------------------
-def rate_limit(client_id: str):
+# -------------------------------------------------------
+def check_rate_limit(client_id: str):
 
     now = time.time()
 
-    timestamps = client_requests[client_id]
+    hits = client_hits[client_id]
 
-    timestamps = [
+    hits = [
         t
-        for t in timestamps
+        for t in hits
         if now - t < WINDOW
     ]
 
-    client_requests[client_id] = timestamps
+    client_hits[client_id] = hits
 
-    if len(timestamps) >= RATE_LIMIT:
+    if len(hits) >= RATE_LIMIT:
 
         retry_after = max(
             1,
-            int(WINDOW - (now - timestamps[0])) + 1
+            int(WINDOW - (now - hits[0])) + 1
         )
 
-        response = JSONResponse(
-            status_code=429,
-            content={
-                "detail": "Rate limit exceeded"
-            }
+        response = Response(
+            content='{"detail":"Rate limit exceeded"}',
+            media_type="application/json",
+            status_code=429
         )
 
         response.headers["Retry-After"] = str(retry_after)
 
         return response
 
-    timestamps.append(now)
+    hits.append(now)
 
-    client_requests[client_id] = timestamps
+    client_hits[client_id] = hits
 
     return None
 
 
-# -----------------------------
+# -------------------------------------------------------
 # Home
-# -----------------------------
+# -------------------------------------------------------
 @app.get("/")
-def home():
+def root():
 
     return {
         "message": "Orders API Running"
     }
 
 
-# -----------------------------
+# -------------------------------------------------------
 # POST /orders
-# -----------------------------
-@app.post("/orders", status_code=201)
+# -------------------------------------------------------
+@app.post("/orders")
 def create_order(
     response: Response,
     idempotency_key: str = Header(..., alias="Idempotency-Key"),
     x_client_id: str = Header("default", alias="X-Client-Id"),
 ):
 
-    limit = rate_limit(x_client_id)
+    rl = check_rate_limit(x_client_id)
 
-    if limit:
-        return limit
+    if rl is not None:
+        return rl
 
-    if idempotency_key in idempotency_cache:
+    if idempotency_key in idempotency:
 
         response.status_code = 200
 
-        return idempotency_cache[idempotency_key]
+        return idempotency[idempotency_key]
 
     order = {
-        "id": f"ord_{len(idempotency_cache)+1}"
+        "id": f"ord_{len(idempotency)+1}"
     }
 
-    idempotency_cache[idempotency_key] = order
+    idempotency[idempotency_key] = order
+
+    response.status_code = 201
 
     return order
 
 
-# -----------------------------
+# -------------------------------------------------------
 # GET /orders
-# -----------------------------
+# -------------------------------------------------------
 @app.get("/orders")
 def get_orders(
     limit: int = 10,
@@ -136,15 +136,16 @@ def get_orders(
     x_client_id: str = Header("default", alias="X-Client-Id"),
 ):
 
-    rl = rate_limit(x_client_id)
+    rl = check_rate_limit(x_client_id)
 
-    if rl:
+    if rl is not None:
         return rl
 
     if limit <= 0:
+
         raise HTTPException(
             status_code=400,
-            detail="limit must be greater than zero"
+            detail="Invalid limit"
         )
 
     start = 0
@@ -166,7 +167,7 @@ def get_orders(
 
     end = min(start + limit, TOTAL_ORDERS)
 
-    items = orders_catalog[start:end]
+    items = orders[start:end]
 
     next_cursor = None
 
