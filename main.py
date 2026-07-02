@@ -43,33 +43,28 @@ catalog = [
 # Rate Limiter
 # -----------------------------------
 def check_rate_limit(client_id: str):
-
     now = time.time()
-
     bucket = client_requests[client_id]
 
     while bucket and now - bucket[0] >= WINDOW:
         bucket.popleft()
 
     if len(bucket) >= RATE_LIMIT:
-
         retry_after = max(
             1,
-            int(WINDOW - (now - bucket[0])) + 1
+            int(bucket[0] + WINDOW - now + 0.999)
         )
 
-        return JSONResponse(
+        response = JSONResponse(
             status_code=429,
-            content={
-                "detail": "Rate limit exceeded"
-            },
-            headers={
-                "Retry-After": str(retry_after)
-            }
+            content={"detail": "Rate limit exceeded"}
         )
+
+        response.headers["Retry-After"] = str(retry_after)
+
+        return response
 
     bucket.append(now)
-
     return None
 
 
@@ -101,7 +96,7 @@ async def create_order(
 ):
 
     rate = check_rate_limit(x_client_id)
-    if rate:
+    if rate is not None:
         return rate
 
     if not idempotency_key:
