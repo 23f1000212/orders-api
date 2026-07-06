@@ -3,16 +3,14 @@ import time
 from collections import defaultdict
 from typing import Optional
 
-from fastapi import FastAPI, Header, Request
+from fastapi import FastAPI, Header, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
 
-app = FastAPI(title="Orders API")
+app = FastAPI()
 
-# --------------------------------------------------
+# ----------------------------
 # CORS
-# --------------------------------------------------
-
+# ----------------------------
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -21,135 +19,95 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# --------------------------------------------------
+# ----------------------------
 # Constants
-# --------------------------------------------------
-
+# ----------------------------
 TOTAL_ORDERS = 59
 RATE_LIMIT = 17
 WINDOW = 10
 
-# --------------------------------------------------
-# Data
-# --------------------------------------------------
-
+# ----------------------------
+# In-memory data
+# ----------------------------
 orders = [
-    {
-        "id": i,
-        "description": f"Order {i}"
-    }
+    {"id": i, "description": f"Order {i}"}
     for i in range(1, TOTAL_ORDERS + 1)
 ]
 
-idempotency_cache = {}
+idempotency = {}
 
-client_requests = defaultdict(list)
+client_hits = defaultdict(list)
 
-# --------------------------------------------------
-# Rate Limiter
-# --------------------------------------------------
 
-def rate_limit(client_id: str):
-
+# ----------------------------
+# Rate limiter
+# ----------------------------
+def enforce_rate_limit(client_id: str):
     now = time.time()
 
-    hits = [
-        t for t in client_requests[client_id]
-        if now - t < WINDOW
-    ]
-
-    client_requests[client_id] = hits
+    hits = [t for t in client_hits[client_id] if now - t < WINDOW]
+    client_hits[client_id] = hits
 
     if len(hits) >= RATE_LIMIT:
+        retry_after = max(1, int(WINDOW - (now - hits[0])) + 1)
 
-        retry_after = max(
-            1,
-            int(WINDOW - (now - hits[0])) + 1
-        )
-
-        return JSONResponse(
+        raise HTTPException(
             status_code=429,
+            detail="Rate limit exceeded",
             headers={
                 "Retry-After": str(retry_after)
-            },
-            content={
-                "detail": "Rate limit exceeded"
             },
         )
 
     hits.append(now)
-
-    client_requests[client_id] = hits
-
-    return None
+    client_hits[client_id] = hits
 
 
-# --------------------------------------------------
+# ----------------------------
 # Home
-# --------------------------------------------------
-
+# ----------------------------
 @app.get("/")
-def home():
-
-    return {
-        "message": "Orders API Running"
-    }
+def root():
+    return {"message": "Orders API Running"}
 
 
-# --------------------------------------------------
+# ----------------------------
 # POST /orders
-# --------------------------------------------------
-
-@app.post("/orders")
-async def create_order(
-    request: Request,
+# ----------------------------
+@app.post("/orders", status_code=201)
+def create_order(
     idempotency_key: Optional[str] = Header(None, alias="Idempotency-Key"),
     x_client_id: str = Header("default", alias="X-Client-Id"),
 ):
 
-    limited = rate_limit(x_client_id)
-
-    if limited:
-        return limited
+    enforce_rate_limit(x_client_id)
 
     if not idempotency_key:
+        idempotency_key = f"auto-{time.time_ns()}"
 
-        idempotency_key = f"generated-{time.time_ns()}"
-
-    if idempotency_key in idempotency_cache:
-
-        return JSONResponse(
-            status_code=200,
-            content=idempotency_cache[idempotency_key],
-        )
+    if idempotency_key in idempotency:
+        return idempotency[idempotency_key]
 
     order = {
-        "id": f"ord_{len(idempotency_cache)+1}"
+        "id": f"ord_{len(idempotency)+1}"
     }
 
-    idempotency_cache[idempotency_key] = order
+    idempotency[idempotency_key] = order
 
-    return JSONResponse(
-        status_code=201,
-        content=order,
-    )
+    return order
 
 
-# --------------------------------------------------
+# ----------------------------
 # GET /orders
-# --------------------------------------------------
-
+# ----------------------------
 @app.get("/orders")
-async def list_orders(
+def get_orders(
     limit: int = 10,
     cursor: Optional[str] = None,
     x_client_id: str = Header("default", alias="X-Client-Id"),
 ):
 
-    limited = rate_limit(x_client_id)
-
-    if limited:
-        return limited
+    enforce_rate_limit(x_client_id)
 
     if limit < 1:
         limit = 1
@@ -157,29 +115,19 @@ async def list_orders(
     start = 0
 
     if cursor:
-
         try:
-            start = int(
-                base64.b64decode(cursor).decode()
-            )
-
+            start = int(base64.b64decode(cursor).decode())
         except Exception:
-
             start = 0
 
     end = min(start + limit, TOTAL_ORDERS)
 
-    items = orders[start:end]
-
     next_cursor = None
 
     if end < TOTAL_ORDERS:
-
-        next_cursor = base64.b64encode(
-            str(end).encode()
-        ).decode()
+        next_cursor = base64.b64encode(str(end).encode()).decode()
 
     return {
-        "items": items,
-        "next_cursor": next_cursor
+        "items": orders[start:end],
+        "next_cursor": next_cursor,
     }
