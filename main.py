@@ -42,25 +42,25 @@ async def limiter(request: Request, call_next):
 
     if request.url.path == "/orders":
 
-        client = request.headers.get("X-Client-Id", "default")
+        client = request.headers.get("X-Client-Id","default")
 
         now = time.time()
 
         history = rate_limits.get(client, [])
 
-        history = [x for x in history if now - x < WINDOW]
+        history = [x for x in history if now-x < 10]
 
-        if len(history) >= RATE_LIMIT:
+        if len(history) >= 17:
             return Response(
                 status_code=429,
                 headers={
-                    "Retry-After": str(WINDOW)
+                    "Retry-After":"10"
                 }
             )
 
         history.append(now)
 
-        rate_limits[client] = history
+        rate_limits[client]=history
 
     return await call_next(request)
 
