@@ -1,15 +1,15 @@
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
-import uuid
 import time
+import uuid
 
 app = FastAPI()
 
-# -----------------------------
+# ----------------------------
 # CORS
-# -----------------------------
+# ----------------------------
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -20,93 +20,94 @@ app.add_middleware(
 
 TOTAL_ORDERS = 59
 RATE_LIMIT = 17
-WINDOW_SECONDS = 10
+WINDOW = 10
 
-# In-memory stores
-idempotency_store = {}
-rate_limit_store = {}
+# Stores
+idempotency = {}
+rate_limits = {}
 
 
-class OrderRequest(BaseModel):
+class Order(BaseModel):
     product: str = ""
     quantity: int = 1
 
 
-# -----------------------------
+# ----------------------------
+# Middleware
+# ----------------------------
+@app.middleware("http")
+async def limiter(request: Request, call_next):
+
+    if request.url.path == "/orders":
+
+        client = request.headers.get("X-Client-Id", "default")
+
+        now = time.time()
+
+        history = rate_limits.get(client, [])
+
+        history = [x for x in history if now - x < WINDOW]
+
+        if len(history) >= RATE_LIMIT:
+            return Response(
+                status_code=429,
+                headers={
+                    "Retry-After": str(WINDOW)
+                }
+            )
+
+        history.append(now)
+
+        rate_limits[client] = history
+
+    return await call_next(request)
+
+
+# ----------------------------
 # POST /orders
-# -----------------------------
+# ----------------------------
 @app.post("/orders", status_code=201)
-async def create_order(request: Request, order: OrderRequest):
+async def create_order(request: Request, body: Order):
 
-    client_id = request.headers.get("X-Client-Id", "anonymous")
-    idem_key = request.headers.get("Idempotency-Key")
+    key = request.headers.get("Idempotency-Key")
 
-    # -----------------------------
-    # Rate Limiting
-    # -----------------------------
-    now = time.time()
+    if key and key in idempotency:
+        return idempotency[key]
 
-    timestamps = rate_limit_store.get(client_id, [])
-
-    timestamps = [
-        t for t in timestamps
-        if now - t < WINDOW_SECONDS
-    ]
-
-    if len(timestamps) >= RATE_LIMIT:
-        return JSONResponse(
-            status_code=429,
-            headers={
-                "Retry-After": str(WINDOW_SECONDS)
-            },
-            content={
-                "detail": "Rate limit exceeded"
-            }
-        )
-
-    timestamps.append(now)
-    rate_limit_store[client_id] = timestamps
-
-    # -----------------------------
-    # Idempotency
-    # -----------------------------
-    if idem_key and idem_key in idempotency_store:
-        return idempotency_store[idem_key]
-
-    order_data = {
+    result = {
         "id": str(uuid.uuid4()),
-        "product": order.product,
-        "quantity": order.quantity
+        "product": body.product,
+        "quantity": body.quantity
     }
 
-    if idem_key:
-        idempotency_store[idem_key] = order_data
+    if key:
+        idempotency[key] = result
 
     return JSONResponse(
         status_code=201,
-        content=order_data
+        content=result
     )
 
 
-# -----------------------------
+# ----------------------------
 # GET /orders
-# -----------------------------
+# ----------------------------
 @app.get("/orders")
-async def get_orders(
-    limit: int = 10,
-    cursor: str | None = None
-):
+async def get_orders(limit: int = 10, cursor: str | None = None):
 
-    start = int(cursor) if cursor else 0
+    try:
+        start = int(cursor) if cursor else 0
+    except:
+        start = 0
+
+    start = max(0, start)
 
     end = min(start + limit, TOTAL_ORDERS)
 
     items = []
 
     for i in range(start + 1, end + 1):
-        items.append({
-            "id": i
-        })
+        items.append({"id": i})
 
     next_cursor = None
 
@@ -119,12 +120,8 @@ async def get_orders(
     }
 
 
-# -----------------------------
-# Health Check
-# -----------------------------
 @app.get("/")
 async def root():
     return {
-        "status": "ok",
-        "message": "Orders API is running"
+        "status": "running"
     }
