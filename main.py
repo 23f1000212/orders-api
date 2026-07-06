@@ -15,7 +15,7 @@ app.add_middleware(
     allow_origins=[
         "https://exam.sanand.workers.dev"
     ],
-    allow_credentials=False,
+    allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
