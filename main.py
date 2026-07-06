@@ -1,175 +1,87 @@
-import base64
-import time
-from collections import defaultdict, deque
-from typing import Optional
-
-from fastapi import FastAPI, Header, HTTPException, Response
+from fastapi import FastAPI, Request, Header, HTTPException, Response
 from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
+from typing import Optional
+import uuid
+import time
 
-app = FastAPI(title="Orders API")
+app = FastAPI()
 
-# -------------------------------------------------------
+# -----------------------------
 # CORS
-# -------------------------------------------------------
+# -----------------------------
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=False,
+    allow_origins=["*"],  # Replace with exam origin if required
+    allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# -------------------------------------------------------
-# Constants
-# -------------------------------------------------------
 TOTAL_ORDERS = 59
 RATE_LIMIT = 17
-WINDOW = 10
+WINDOW = 10  # seconds
 
-# -------------------------------------------------------
-# In-memory storage
-# -------------------------------------------------------
-orders = [
-    {
-        "id": i,
-        "description": f"Order {i}"
-    }
-    for i in range(1, TOTAL_ORDERS + 1)
-]
-
-idempotency = {}
-
-client_hits = defaultdict(list)
+# -----------------------------
+# In-memory stores
+# -----------------------------
+idempotency_store = {}
+rate_limit_store = {}
 
 
-# -------------------------------------------------------
-# Rate Limiter
-# -------------------------------------------------------
-def check_rate_limit(client_id: str):
+class OrderRequest(BaseModel):
+    item: Optional[str] = None
+    quantity: Optional[int] = 1
+
+
+@app.post("/orders", status_code=201)
+async def create_order(
+    request: OrderRequest,
+    response: Response,
+    idempotency_key: Optional[str] = Header(None, alias="Idempotency-Key"),
+    client_id: Optional[str] = Header("default", alias="X-Client-Id"),
+):
 
     now = time.time()
 
-    bucket = client_hits[client_id]
+    timestamps = rate_limit_store.get(client_id, [])
+    timestamps = [t for t in timestamps if now - t < WINDOW]
 
-    while bucket and now - bucket[0] >= WINDOW:
-        bucket.popleft()
+    if len(timestamps) >= RATE_LIMIT:
+        response.headers["Retry-After"] = str(WINDOW)
+        raise HTTPException(status_code=429, detail="Rate limit exceeded")
 
-    if len(bucket) >= RATE_LIMIT:
+    timestamps.append(now)
+    rate_limit_store[client_id] = timestamps
 
-        retry_after = max(
-            1,
-            int(bucket[0] + WINDOW - now)
-        )
-
-        response = Response(
-            status_code=429,
-            media_type="application/json",
-            content='{"detail":"Rate limit exceeded"}'
-        )
-
-        response.headers["Retry-After"] = str(retry_after)
-
-        return response
-
-    bucket.append(now)
-
-    return None
-
-# -------------------------------------------------------
-# Home
-# -------------------------------------------------------
-@app.get("/")
-def root():
-
-    return {
-        "message": "Orders API Running"
-    }
-
-
-# -------------------------------------------------------
-# POST /orders
-# -------------------------------------------------------
-@app.post("/orders")
-def create_order(
-    response: Response,
-    idempotency_key: str = Header(..., alias="Idempotency-Key"),
-    x_client_id: str = Header("default", alias="X-Client-Id"),
-):
-
-    rl = check_rate_limit(x_client_id)
-
-    if rl is not None:
-        return rl
-
-    if idempotency_key in idempotency:
-
-        response.status_code = 200
-
-        return idempotency[idempotency_key]
+    if idempotency_key:
+        if idempotency_key in idempotency_store:
+            return idempotency_store[idempotency_key]
 
     order = {
-        "id": f"ord_{len(idempotency)+1}"
+        "id": str(uuid.uuid4()),
+        "item": request.item,
+        "quantity": request.quantity,
     }
 
-    idempotency[idempotency_key] = order
-
-    response.status_code = 201
+    if idempotency_key:
+        idempotency_store[idempotency_key] = order
 
     return order
 
 
-# -------------------------------------------------------
-# GET /orders
-# -------------------------------------------------------
 @app.get("/orders")
-def get_orders(
-    limit: int = 10,
-    cursor: Optional[str] = None,
-    x_client_id: str = Header("default", alias="X-Client-Id"),
-):
+async def list_orders(limit: int = 10, cursor: Optional[str] = None):
 
-    rl = check_rate_limit(x_client_id)
-
-    if rl is not None:
-        return rl
-
-    if limit <= 0:
-
-        raise HTTPException(
-            status_code=400,
-            detail="Invalid limit"
-        )
-
-    start = 0
-
-    if cursor:
-
-        try:
-
-            start = int(
-                base64.b64decode(cursor).decode()
-            )
-
-        except Exception:
-
-            raise HTTPException(
-                status_code=400,
-                detail="Invalid cursor"
-            )
+    start = int(cursor) if cursor else 0
 
     end = min(start + limit, TOTAL_ORDERS)
 
-    items = orders[start:end]
+    items = [{"id": i} for i in range(start + 1, end + 1)]
 
-    next_cursor = None
-
-    if end < TOTAL_ORDERS:
-
-        next_cursor = base64.b64encode(
-            str(end).encode()
-        ).decode()
+    next_cursor = str(end) if end < TOTAL_ORDERS else None
 
     return {
         "items": items,
-        "next_cursor": next_cursor
+        "next_cursor": next_cursor,
     }
